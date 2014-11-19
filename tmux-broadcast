@@ -19,6 +19,11 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+BASENAME=$(basename $0)
+
+OPT_MUST_SAVE=false
+OPT_SAVE_PATH=''
+OPT_VERBOSE=false
 
 broadcast()
 {
@@ -102,6 +107,17 @@ is_inside_tmux()
     return 1
 }
 
+handle_args()
+{
+    if [[ "$OPT_MUST_SAVE" == true ]]; then
+        # Truncate save path to new file
+        echo -n "" > $OPT_SAVE_PATH
+        if [[ "$OPT_VERBOSE" == true ]]; then
+            echo "saving commands to '$OPT_SAVE_PATH'"
+        fi
+    fi
+}
+
 main()
 {
     if [ $# -lt 1 ]; then
@@ -116,7 +132,43 @@ main()
         exit
     fi
 
-    local desired=$@
+    local args=$(getopt -o 's:v' -l 'save:verbose' -n "$BASENAME" -- "$@")
+    # Handle options
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+    eval set -- "$args"
+
+    # Options
+    # Extract options and their arguments
+    while true; do
+        case "$1" in
+            -s|--save)
+                shift;
+                case "$1" in
+                    "")
+                        shift
+                    ;;
+                    *)
+                        OPT_MUST_SAVE=true
+                        OPT_SAVE_PATH="$1"
+                        shift
+                    ;;
+                esac
+            ;;
+            -v|--verbose)
+                OPT_VERBOSE=true
+                shift;
+            ;;
+            --)
+                shift
+                break
+            ;;
+        esac
+    done
+
+
+    local desired="$@"
     local sourcep=$(get_broadcast_source)
     local targetp=""
     if targetp=$(get_broadcast_targets $desired); then
@@ -125,6 +177,9 @@ main()
         echo "$targetp"
         exit
     fi
+
+    # Prepare the environment for execution
+    handle_args
 
     # Set terminal to not echo characters because we want control of stdout
     stty -echo
@@ -159,6 +214,9 @@ main()
                 echop="$echop\033[K"
             ;;
         esac
+        if [[ "$OPT_MUST_SAVE" == 'true' ]]; then
+            echo -en "$echop" >> $OPT_SAVE_PATH
+        fi
         echo -en "$echop"
         broadcast "$typed" $targetp
     done
