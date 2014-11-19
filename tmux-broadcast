@@ -1,0 +1,161 @@
+#!/bin/bash
+
+# Copyright (c) 2014 Julien Limoges
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+broadcast()
+{
+    local targets=${@:2}
+    local keypress=$1
+    for pane_id in $targets; do
+        tmux send-keys -t $pane_id $keypress
+    done
+}
+
+get_broadcast_source()
+{
+    local all_panes=$(echo $(tmux list-panes -F '#{pane_id}'))
+    local self_index=$(echo $(tmux display-message -p '#P'))
+    # The cut indexes start from 1
+    local cut_index=$((self_index+1))
+    local pane_id=$(echo $all_panes | cut -d ' ' -f $cut_index)
+
+    echo $pane_id
+    return 0
+}
+
+get_broadcast_targets()
+{
+    local desired="$@"
+    local all_panes=$(echo $(tmux list-panes -F '#{pane_id}'))
+    local nb_panes=$(echo "$all_panes" | wc -w)
+    local self_index=$(echo $(tmux display-message -p '#P'))
+    local translated=
+
+    for pane_index in $desired; do
+        if [[ "$pane_index" -ge "$nb_panes" ]]; then
+            # Over upper bound
+            echo "error: only $nb_panes in window but index '$pane_index' was given"
+            return 1
+        fi
+        if [[ "$pane_index" -eq "$self_index" ]]; then
+            echo "error: cannot broadcast from '$self_index' to '$pane_index' (loop)"
+            return 1
+        fi
+        # The cut indexes start from 1
+        local cut_index=$((pane_index+1))
+        local pane_id=$(echo $all_panes | cut -d ' ' -f $cut_index)
+        translated="$translated $pane_id"
+    done
+    echo $translated
+    return 0
+}
+
+read_key()
+{
+    local key=none
+    local key1=
+    local key2=
+    local key3=
+
+    # We read from 1 up to 4 characters. The reason for the characters 2-4 is
+    # for escaped sequence of characters.
+    # The first read is blocking. Upon input we test for an escaped sequence.
+    # printf "'x%x'" "'${key1}" 1>&2
+    unset key1 key2 key3
+    # Rapidly get the keys after blocking read
+    read -r -N1          2>/dev/null
+    key1="$REPLY"
+    read -r -N2 -t 0.001 2>/dev/null
+    key2="$REPLY"
+    read -r -N1 -t 0.001 2>/dev/null
+    key3="$REPLY"
+    key="$key1$key2$key3"
+    echo -n -E "$key"
+    return 0
+}
+
+is_inside_tmux()
+{
+    if ! { [ "$TERM" = "screen" ] && [ -n "$TMUX" ]; } then
+        return 0
+    fi
+    return 1
+}
+
+main()
+{
+    if [ $# -lt 1 ]; then
+        echo 'bcast: missing pane index operand'
+        echo 'usage: bcast INDEX...'
+        echo '  INDEX is the pane index which should receive the broadcasted keypresses'
+        exit
+    fi
+
+    if [ ! is_inside_tmux ]; then
+        echo 'error: program is meant to be run inside a tmux session'
+        exit
+    fi
+
+    local desired=$@
+    local sourcep=$(get_broadcast_source)
+    local targetp=""
+    if targetp=$(get_broadcast_targets $desired); then
+        : noop
+    else
+        echo "$targetp"
+        exit
+    fi
+
+    # Set terminal to not echo characters because we want control of stdout
+    stty -echo
+
+    while true; do
+        local keypress=$(read_key)
+        local echop="$keypress"
+
+        # Special case handling
+        # e.g. Backspace functionality
+        # TODO: block unwanted functionality such as up/down...
+        case "$keypress" in
+            # Up
+            $'\x1b\x5b\x41') 
+                echop=""
+            ;;
+            # Down
+            $'\x1b\x5b\x42') 
+                echop=""
+            ;;
+            # Backspace
+            $'\x08')
+                echop="$echop\033[K"
+            ;;
+            $'\x20')
+                keypress='space'
+            ;;
+        esac
+        echo -e -n "$echop"
+        broadcast $keypress $targetp
+    done
+}
+
+# Emulate a program main to have better flow control throughout the program
+main $@
+
