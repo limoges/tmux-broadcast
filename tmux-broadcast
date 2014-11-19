@@ -22,10 +22,10 @@
 
 broadcast()
 {
-    local targets=${@:2}
-    local keypress=$1
+    local targets="${@:2}"
+    local typed="$1"
     for pane_id in $targets; do
-        tmux send-keys -t $pane_id $keypress
+        tmux send-keys -t "$pane_id" "$typed"
     done
 }
 
@@ -68,17 +68,16 @@ get_broadcast_targets()
     return 0
 }
 
+KEYPRESS=''
 read_key()
 {
-    local key=none
     local key1=
     local key2=
     local key3=
-
+    
     # We read from 1 up to 4 characters. The reason for the characters 2-4 is
     # for escaped sequence of characters.
     # The first read is blocking. Upon input we test for an escaped sequence.
-    # printf "'x%x'" "'${key1}" 1>&2
     unset key1 key2 key3
     # Rapidly get the keys after blocking read
     read -r -N1          2>/dev/null
@@ -87,8 +86,11 @@ read_key()
     key2="$REPLY"
     read -r -N1 -t 0.001 2>/dev/null
     key3="$REPLY"
-    key="$key1$key2$key3"
-    echo -n -E "$key"
+
+    # We use a global because this seems to be the only way
+    # to make enter work.
+    KEYPRESS="$key1$key2$key3"
+    #printf "keypress read \\\x%02x\n" "'${key1}" 1>&2
     return 0
 }
 
@@ -128,31 +130,37 @@ main()
     stty -echo
 
     while true; do
-        local keypress=$(read_key)
-        local echop="$keypress"
+        read_key
+        local echop="$KEYPRESS"
+        local typed="$KEYPRESS"
+        #printf "keypress received \\\x%02x\n" "'${typed}" 1>&2
 
-        # Special case handling
-        # e.g. Backspace functionality
-        # TODO: block unwanted functionality such as up/down...
-        case "$keypress" in
+        # Special behaviour handling
+        # e.g. implementing backspace functionality on input pane
+        case "$typed" in
             # Up
             $'\x1b\x5b\x41') 
-                echop=""
+                # Disable up on input pane
+                echop=''
             ;;
             # Down
             $'\x1b\x5b\x42') 
-                echop=""
+                # Disable down on input pane
+                echop=''
+            ;;
+            # Tab
+            $'\x09')
+                # Disable tab on input pane
+                echop=''
             ;;
             # Backspace
             $'\x08')
+                # Backspace should work as intended on the input pane
                 echop="$echop\033[K"
             ;;
-            $'\x20')
-                keypress='space'
-            ;;
         esac
-        echo -e -n "$echop"
-        broadcast $keypress $targetp
+        echo -en "$echop"
+        broadcast "$typed" $targetp
     done
 }
 
