@@ -28,6 +28,7 @@ OPT_LOG=false
 OPT_LOG_PATH=''
 OPT_INTERACTIVE=false
 OPT_VERBOSE=false
+OPT_SILENT=false
 ARG_DST=''
 ARG_SRC=''
 PIPED=false
@@ -89,8 +90,10 @@ read_rune()
     # Rapidly get the keys after blocking read
     # $REPLY contains the data read by `read`
     read -r -N1 2>/dev/null
+    if [[ "$?" -ne 0 ]]; then
+        return 1
+    fi
     byte1="$REPLY"
-
     # Check for an escaped sequence
     if [[ "$byte1" == $'\x1b' ]]; then
         read -r -N2 -t 0.001 2>/dev/null
@@ -119,7 +122,6 @@ is_interactive()
     echo true
 }
 
-
 usage()
 {
     echo "usage:  $BASENAME [options] INDEX..."
@@ -144,16 +146,16 @@ handle_params()
     fi
 
     # Retrieve options and arguments
-    local getopted=$(getopt -o 'l:v' -l 'log:verbose' -n "$BASENAME" -- "$params")
+    local args="$(getopt -o l:vs -l log: --name "$BASENAME" -- "$@")"
 
     # We must have valid options and arguments
-    if [ "$?" -ne 0 ]; then
+    if [[ $? -ne 0 ]]; then
         err_msg "could not process parameters"
         usage 1>&2
         exit 1
     fi
 
-    eval set -- "$getopted"
+    eval set -- "$args"
 
     # Extract options one by one until we only have arguments left
     # We must use `shift` everytime a word is processed.
@@ -172,6 +174,10 @@ handle_params()
                     ;;
                 esac
             ;;
+            -s|--silent)
+                OPT_SILENT=true
+                shift
+            ;;
             -v|--verbose)
                 OPT_VERBOSE=true
                 shift
@@ -181,11 +187,15 @@ handle_params()
                 # No more options to process
                 break
             ;;
+            *)
+                err_msg "option parsing failed"
+                exit 1
+            ;;
         esac
     done
 
     # We must have at least one broadcasting target
-    local nb_args=$(echo "$params" | wc -w)
+    local nb_args=$(echo "$@" | wc -w)
     if [ "$nb_args" -lt 1 ]; then
         err_msg "missing pane operand"
         usage 1>&2
@@ -194,7 +204,7 @@ handle_params()
 
     # Parameters now only contains destinations
     ARG_SRC=$(tmux_get_src)
-    ARG_DST=$(translate_idx_to_id "$params")
+    ARG_DST=$(translate_idx_to_id "$@")
 
     # Additional work for options
     # If log is requested, create the file (or truncate it)
@@ -207,20 +217,18 @@ handle_params()
     fi
 }
 
-broadcast_interactive()
+run()
 {
     # Take control of what is output to the source pane
-    stty -echo
+    if [[ -t 0 ]]; then
+        stty -echo
+    fi
 
-    while true; do
-        read_rune
-
+    while read_rune; do
         # Feedback to be given to the source pane
         local feedback="$KEY_PRESSED"
         # Message to be broadcasted
         local message="$KEY_PRESSED"
-
-        #printf "received \\\x%02x\n" "'${$KEY_PRESSED}" 1>&2
 
         # Control keys handling
         case "$message" in
@@ -249,7 +257,7 @@ broadcast_interactive()
         # Send feedback and broadcast
         echo -en "$feedback"
         tmux_broadcast "$message" 
-
+        
         # It seems as if writing control characters through echo does not
         # pass to the file. Unsure though.
         if [[ "$OPT_LOG" == "true" ]]; then
@@ -263,7 +271,7 @@ main()
     # Process the options and get the resulting arguments
     handle_params "$@"
 
-    broadcast_interactive
+    run
 }
 
 # Emulate a program main to have better flow control throughout the program
