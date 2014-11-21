@@ -16,9 +16,9 @@ SYNOPSIS
     tmux-broadcast [OPTION]... [PANE]...
 
 EXAMPLES
-    tmux-broadcast -s 'file.sh' -v 1 2 3
+    tmux-broadcast -l 'file.sh' -v 1 2 3
 
-        Save commands to 'file.sh'; Increase verbosity; Broadcast to panes 1, 2, 3.
+        Log commands to 'file.sh'; Increase verbosity; Broadcast to panes 1, 2, 3.
 
 DESCRIPTION
     Broadcast commands from one pane to any panes (in current window by default).
@@ -28,7 +28,7 @@ DESCRIPTION
 
     Mandatory arguments to long options are mandatory for short options too.
 
-    -s, --save=PATH
+    -l, --log=PATH
         write commands entered to the given path
 
 AUTHOR

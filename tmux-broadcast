@@ -23,82 +23,86 @@
 
 BASENAME=$(basename $0)
 
-# Options are kept global for simplicity
-OPT_MUST_SAVE=false
-OPT_SAVE_PATH=''
+# Options and arguments are kept global for simplicity
+OPT_LOG=false
+OPT_LOG_PATH=''
+OPT_INTERACTIVE=false
 OPT_VERBOSE=false
+ARG_DST=''
+ARG_SRC=''
+PIPED=false
 
-broadcast()
+# Keyboard activity
+KEY_PRESSED=''
+
+tmux_broadcast()
 {
-    local targets="${@:2}"
-    local typed="$1"
-    for pane_id in $targets; do
-        tmux send-keys -t "$pane_id" "$typed"
+    local message="$@"
+
+    for id in $ARG_DST; do
+        tmux send-key -t "$id" "$@"
     done
 }
 
-get_broadcast_source()
+# Get all the pane ids in current window
+tmux_get_all()
 {
-    local all_panes=$(echo $(tmux list-panes -F '#{pane_id}'))
-    local self_index=$(echo $(tmux display-message -p '#P'))
-    # The cut indexes start from 1
-    local cut_index=$((self_index+1))
-    local pane_id=$(echo $all_panes | cut -d ' ' -f $cut_index)
-
-    echo $pane_id
-    return 0
+    echo $(tmux list-panes -F '#{pane_id}')
 }
 
-get_broadcast_targets()
+# Get the current pane id
+tmux_get_src()
 {
-    local desired="$@"
-    local all_panes=$(echo $(tmux list-panes -F '#{pane_id}'))
-    local nb_panes=$(echo "$all_panes" | wc -w)
-    local self_index=$(echo $(tmux display-message -p '#P'))
-    local translated=
-
-    for pane_index in $desired; do
-        if [[ "$pane_index" -ge "$nb_panes" ]]; then
-            # Over upper bound
-            echo "error: only $nb_panes in window but index '$pane_index' was given"
-            return 1
-        fi
-        if [[ "$pane_index" -eq "$self_index" ]]; then
-            echo "error: cannot broadcast from '$self_index' to '$pane_index' (loop)"
-            return 1
-        fi
-        # The cut indexes start from 1
-        local cut_index=$((pane_index+1))
-        local pane_id=$(echo $all_panes | cut -d ' ' -f $cut_index)
-        translated="$translated $pane_id"
-    done
-    echo $translated
-    return 0
+    echo $TMUX_PANE
 }
 
-KEYPRESS=''
-read_key()
+translate_idx_to_id()
 {
-    local key1=
-    local key2=
-    local key3=
+    local indices="$@"
+    # All panes are always sorted by indices
+    local all=$(tmux_get_all)
     
+    local ids=""
+    for idx in $indices; do
+        # Translate [0,n] indices to [1,n+1]
+        local id=$(echo "$all" | cut -d ' ' -f $((idx+1)))
+        if [[ "$id" == "" ]]; then
+            err_msg "pane $idx could not be found"
+            exit 1
+        fi
+        ids="$ids $id"
+    done
+    echo $ids
+    return 0
+}
+
+read_rune()
+{
+    local byte1=''
+    local byte23=''
+    local byte4=''
+
     # We read from 1 up to 4 characters. The reason for the characters 2-4 is
     # for escaped sequence of characters.
     # The first read is blocking. Upon input we test for an escaped sequence.
-    unset key1 key2 key3
+
     # Rapidly get the keys after blocking read
-    read -r -N1          2>/dev/null
-    key1="$REPLY"
-    read -r -N2 -t 0.001 2>/dev/null
-    key2="$REPLY"
-    read -r -N1 -t 0.001 2>/dev/null
-    key3="$REPLY"
+    # $REPLY contains the data read by `read`
+    read -r -N1 2>/dev/null
+    byte1="$REPLY"
+
+    # Check for an escaped sequence
+    if [[ "$byte1" == $'\x1b' ]]; then
+        read -r -N2 -t 0.001 2>/dev/null
+        byte23="$REPLY"
+        read -r -N1 -t 0.001 2>/dev/null
+        byte4="$REPLY"
+    fi
 
     # We use a global because this seems to be the only way
     # to make enter work.
-    KEYPRESS="$key1$key2$key3"
-    #printf "keypress read \\\x%02x\n" "'${key1}" 1>&2
+    KEY_PRESSED="$byte1$byte23$byte4"
+    # printf "keypress read \\\x%02x\n" "'${key1}" 1>&2
     return 0
 }
 
@@ -110,119 +114,156 @@ is_inside_tmux()
     return 1
 }
 
-handle_args()
+is_interactive()
 {
-    if [[ "$OPT_MUST_SAVE" == true ]]; then
-        # Truncate save path to new file
-        echo -n "" > $OPT_SAVE_PATH
-        if [[ "$OPT_VERBOSE" == true ]]; then
-            echo "saving commands to '$OPT_SAVE_PATH'"
-        fi
-    fi
+    echo true
 }
 
-main()
+
+usage()
 {
-    if [ $# -lt 1 ]; then
-        echo 'bcast: missing pane index operand'
-        echo 'usage: bcast INDEX...'
-        echo '  INDEX is the pane index which should receive the broadcasted keypresses'
-        exit
-    fi
+    echo "usage:  $BASENAME [options] INDEX..."
+    echo "            INDEX corresponds to the tmux pane index obtained with tmux display-panes"
+    echo "            NOTE:$BASENAME must be executed inside a tmux session."
+}
 
+err_msg()
+{
+    echo "$BASENAME: $@" 1>&2
+}
+
+handle_params()
+{
+    local params="$@"
+
+    # We must be inside tmux
     if [ ! is_inside_tmux ]; then
-        echo 'error: program is meant to be run inside a tmux session'
-        exit
-    fi
-
-    local args=$(getopt -o 's:v' -l 'save:verbose' -n "$BASENAME" -- "$@")
-    # Handle options
-    if [ $? -ne 0 ]; then
+        err_msg "not in tmux"
+        usage 1>&2
         exit 1
     fi
-    eval set -- "$args"
 
-    # Options
-    # Extract options and their arguments
+    # Retrieve options and arguments
+    local getopted=$(getopt -o 'l:v' -l 'log:verbose' -n "$BASENAME" -- "$params")
+
+    # We must have valid options and arguments
+    if [ "$?" -ne 0 ]; then
+        err_msg "could not process parameters"
+        usage 1>&2
+        exit 1
+    fi
+
+    eval set -- "$getopted"
+
+    # Extract options one by one until we only have arguments left
+    # We must use `shift` everytime a word is processed.
     while true; do
         case "$1" in
-            -s|--save)
-                shift;
+            -l|--log)
+                shift
                 case "$1" in
-                    "")
+                   "")
                         shift
                     ;;
                     *)
-                        OPT_MUST_SAVE=true
-                        OPT_SAVE_PATH="$1"
+                        OPT_LOG=true
+                        OPT_LOG_PATH="$1"
                         shift
                     ;;
                 esac
             ;;
             -v|--verbose)
                 OPT_VERBOSE=true
-                shift;
+                shift
             ;;
             --)
                 shift
+                # No more options to process
                 break
             ;;
         esac
     done
 
-
-    local desired="$@"
-    local sourcep=$(get_broadcast_source)
-    local targetp=""
-    if targetp=$(get_broadcast_targets $desired); then
-        : noop
-    else
-        echo "$targetp"
-        exit
+    # We must have at least one broadcasting target
+    local nb_args=$(echo "$params" | wc -w)
+    if [ "$nb_args" -lt 1 ]; then
+        err_msg "missing pane operand"
+        usage 1>&2
+        exit 1
     fi
 
-    # Prepare the environment for execution
-    handle_args
+    # Parameters now only contains destinations
+    ARG_SRC=$(tmux_get_src)
+    ARG_DST=$(translate_idx_to_id "$params")
 
-    # Set terminal to not echo characters because we want control of stdout
+    # Additional work for options
+    # If log is requested, create the file (or truncate it)
+    if [[ "$OPT_LOG" == true ]]; then
+        if [[ -d $OPT_LOG_PATH ]]; then
+            err_msg "log path is a directory"
+            exit 1
+        fi
+        echo -n "" > "$OPT_LOG_PATH"
+    fi
+}
+
+broadcast_interactive()
+{
+    # Take control of what is output to the source pane
     stty -echo
 
     while true; do
-        read_key
-        local echop="$KEYPRESS"
-        local typed="$KEYPRESS"
-        #printf "keypress received \\\x%02x\n" "'${typed}" 1>&2
+        read_rune
 
-        # Special behaviour handling
-        # e.g. implementing backspace functionality on input pane
-        case "$typed" in
+        # Feedback to be given to the source pane
+        local feedback="$KEY_PRESSED"
+        # Message to be broadcasted
+        local message="$KEY_PRESSED"
+
+        #printf "received \\\x%02x\n" "'${$KEY_PRESSED}" 1>&2
+
+        # Control keys handling
+        case "$message" in
             # Up
             $'\x1b\x5b\x41') 
-                # Disable up on input pane
-                echop=''
+                # Disable UP on input pane
+                feedback=''
             ;;
             # Down
             $'\x1b\x5b\x42') 
-                # Disable down on input pane
-                echop=''
+                # Disable DOWN on input pane
+                feedback=''
             ;;
             # Tab
             $'\x09')
-                # Disable tab on input pane
-                echop=''
+                # Disable TAB on input pane
+                feedback=''
             ;;
             # Backspace
             $'\x08')
                 # Backspace should work as intended on the input pane
-                echop="$echop\033[K"
+                feedback="$feedback\033[K"
             ;;
         esac
-        if [[ "$OPT_MUST_SAVE" == 'true' ]]; then
-            echo -en "$echop" >> $OPT_SAVE_PATH
+
+        # Send feedback and broadcast
+        echo -en "$feedback"
+        tmux_broadcast "$message" 
+
+        # It seems as if writing control characters through echo does not
+        # pass to the file. Unsure though.
+        if [[ "$OPT_LOG" == "true" ]]; then
+            echo -en "$feedback" >> "$OPT_LOG_PATH"
         fi
-        echo -en "$echop"
-        broadcast "$typed" $targetp
     done
+}
+
+main()
+{
+    # Process the options and get the resulting arguments
+    handle_params "$@"
+
+    broadcast_interactive
 }
 
 # Emulate a program main to have better flow control throughout the program
